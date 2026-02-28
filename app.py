@@ -6,8 +6,11 @@ from langchain_openai import ChatOpenAI
 import json
 import re
 import base64
-
 import logging
+
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from pydantic import BaseModel, Field
 
 # Настраиваем логирование: пишем в файл app.log и в консоль
 logging.basicConfig(
@@ -33,8 +36,19 @@ llm = ChatOpenAI(
     api_key=NEBIUS_API_KEY,
     #model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
     model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-    temperature=0
+    request_timeout=120.0, # Ждать максимум 120 секунд!
+    temperature=0,
+    model_kwargs={"response_format": {"type": "json_object"}},
 )
+
+class ImportantFilesSchema(BaseModel):
+    # Pydantic ожидает объект (словарь), поэтому мы оборачиваем список в ключ "files"
+    files: list[str] = Field(description="JSON array of file paths, for example: ['src/main.py', 'config.yaml']")
+
+class RepoSummarySchema(BaseModel):
+    summary: str = Field(description="A clear, human-readable description of what this project does")
+    technologies: list[str] = Field(description="List of main technologies, languages, frameworks")
+    structure: str = Field(description="Brief description of the project structure and organization")
 
 app = Flask(__name__)
 
@@ -51,7 +65,7 @@ def parse_github_url(url):
 
 
 def get_repo_tree(owner, repo, max_depth=2):
-    """Получает дерево файлов репозитория с ограничением глубины"""
+    """Получает дерево файлов репозитория с ограничением глубины и логированием исключенных файлов"""
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     
     url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
@@ -60,13 +74,49 @@ def get_repo_tree(owner, repo, max_depth=2):
     
     tree = response.json().get("tree", [])
     
-    # Фильтруем по глубине
-    filtered_tree = []
-    for item in tree:
-        depth = item["path"].count("/")
-        if depth < max_depth:
-            filtered_tree.append(item)
+    # Расширения, которые мы хотим исключить
+    binary_extensions = (
+        '.exe', '.dll', '.so', '.a', '.lib', '.dylib', '.o', '.obj',
+        '.zip', '.tar', '.gz', '.rar', '.7z', '.pdf', '.doc', '.docx',
+        '.png', '.jpg', '.jpeg', '.gif', '.mp3', '.mp4', '.iso', '.db', 
+        '.sqlite', '.jar', '.class', '.pyc', '.whl', '.ds_store', '.svg',
+        '.woff', '.woff2', '.ttf', '.eot', '.ico', '.lockb', 'package-lock.json'
+    )
     
+    filtered_tree = []
+    excluded_tree = []
+    
+    for item in tree:
+        # 1. Проверяем глубину
+        depth = item["path"].count("/")
+        if depth >= max_depth:
+            continue
+            
+        # 2. Проверяем расширения (бинарники и ненужные файлы)
+        if item["type"] == "blob" and item["path"].lower().endswith(binary_extensions):
+            # Файл попал под фильтр — добавляем в список исключенных
+            excluded_tree.append(item)
+            continue
+            
+        # 3. Файл прошел все фильтры — добавляем в итоговое дерево
+        filtered_tree.append(item)
+        
+    # --- ЛОГИРОВАНИЕ ---
+    
+    # Форматируем списки в читаемый текст
+    filtered_tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in filtered_tree])
+    excluded_tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in excluded_tree])
+    
+    logger.debug("=== ИТОГОВОЕ ДЕРЕВО (отправляется в LLM) ===")
+    logger.debug(f"\n{filtered_tree_text}")
+    logger.debug(f"Всего элементов: {len(filtered_tree)}\n")
+    
+    logger.debug("=== ИСКЛЮЧЕННЫЕ ФАЙЛЫ (отфильтрованы по расширению) ===")
+    logger.debug(f"\n{excluded_tree_text if excluded_tree else 'Нет исключенных файлов'}")
+    logger.debug(f"Всего отсеяно: {len(excluded_tree)}\n")
+    logger.debug("======================================================")
+    
+    # Возвращаем очищенное дерево
     return filtered_tree
 
 
@@ -101,99 +151,118 @@ def analyze_repo_structure(owner, repo, tree, readme):
     """Анализирует структуру и выбирает важные файлы"""
     tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in tree])
     
-    prompt = f"""You are analyzing a GitHub repository structure.
+    # 1. Инициализируем парсер с нашей схемой
+    parser = JsonOutputParser(pydantic_object=ImportantFilesSchema)
+    
+    # 2. Создаем шаблон, куда LangChain сам вставит требования к JSON
+    prompt = PromptTemplate(
+        template="""You are analyzing a GitHub repository structure.
 
 Repository tree (depth up to 2):
 {tree_text}
 
-{"README content:" if readme else "No README found."}
-{readme if readme else ""}
+README content:
+{readme}
 
 Based on this structure and README, select up to 6 most valuable files that would help understand:
 1. What this project does
 2. How it works
 3. Its architecture and main components
 
-Return ONLY a JSON array of file paths, for example:
-["src/main.py", "config.yaml", "package.json"]
-
 Important: Select only files (not directories), prioritize configuration files, entry points, and core source files.
-"""
-    
-    response = llm.invoke(prompt)
-    content = response.content.strip()
 
-    # ДОБАВЬТЕ ЭТОТ ПРИНТ ДЛЯ ОТЛАДКИ:
-    logger.debug("=== RAW LLM RESPONSE ===")
-    logger.debug(repr(content)) # repr покажет все скрытые символы и пустые строки
-    logger.debug("========================")
+{format_instructions}""",
+        input_variables=["tree_text", "readme"],
+        partial_variables={"format_instructions": parser.get_format_instructions()},
+    )
     
-    # Ищем массив в квадратных скобках
-    match = re.search(r'\[.*?\]', content, re.DOTALL)
-    if match:
-        json_str = match.group(0)
-        files = json.loads(json_str)
-    else:
-        raise ValueError("Could not find JSON array in LLM response")
+    # 3. Собираем пайплайн: Промпт -> LLM -> Парсер
+    chain = prompt | llm | parser
     
-    return files
+    try:
+        # Вызываем цепочку. На выходе сразу получаем Python-словарь!
+        result = chain.invoke({
+            "tree_text": tree_text,
+            "readme": readme if readme else "No README found."
+        })
+        
+        logger.debug("=== PARSED LLM RESPONSE (FILES) ===")
+        logger.debug(result)
+        logger.debug("===================================")
+        
+        # Парсер вернет словарь вида {"files": ["path1", "path2"]}, 
+        # возвращаем только список, чтобы не сломать вашу логику дальше
+        return result["files"]
+        
+    except Exception as e:
+        logger.error(f"Failed to parse files JSON: {e}")
+        raise ValueError("Could not extract valid JSON array of files from LLM response")
 
 
-def generate_repo_summary(owner, repo, tree, readme, important_files):
+def generate_repo_summary(owner, repo, tree, readme, important_files, MAX_CHARS_PER_FILE = 10000):
     """Генерирует summary репозитория"""
-    # Получаем содержимое важных файлов
     files_content = {}
     for file_path in important_files:
         try:
             content = get_file_content(owner, repo, file_path)
             files_content[file_path] = content
         except Exception as e:
-            print(f"Warning: Could not fetch {file_path}: {e}")
+            # Заменил print на logger
+            logger.warning(f"Warning: Could not fetch {file_path}: {e}") 
     
     tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in tree])
     
+    # 10000 symbols is Около 2500 токенов на файл максимум
     files_text = ""
+
     for path, content in files_content.items():
+        # Если файл огромный, берем только начало и конец (или просто начало)
+        if len(content) > MAX_CHARS_PER_FILE:
+            content = content[:MAX_CHARS_PER_FILE] + "\n\n... [CONTENT TRUNCATED DUE TO SIZE] ..."
+            
         files_text += f"\n\n=== FILE: {path} ===\n{content}\n"
+        
+    # 1. Инициализируем парсер
+    parser = JsonOutputParser(pydantic_object=RepoSummarySchema)
     
-    prompt = f"""Analyze this GitHub repository and provide a structured summary.
+    # 2. Создаем шаблон
+    prompt = PromptTemplate(
+        template="""Analyze this GitHub repository and provide a structured summary.
 
 Repository tree:
 {tree_text}
 
-{"README:" if readme else ""}
-{readme if readme else ""}
+README:
+{readme}
 
 Key files content:
 {files_text}
 
-Return a valid JSON object with exactly these fields:
-{{
-  "summary": "A clear, human-readable description of what this project does",
-  "technologies": ["list", "of", "main", "technologies", "languages", "frameworks"],
-  "structure": "Brief description of the project structure and organization"
-}}
-
-Return ONLY the JSON object, no additional text.
-"""
+{format_instructions}""",
+        input_variables=["tree_text", "readme", "files_text"],
+        partial_variables={"format_instructions": parser.get_format_instructions()},
+    )
     
-    response = llm.invoke(prompt)
-    content = response.content.strip()
+    # 3. Собираем пайплайн
+    chain = prompt | llm | parser
     
-    # ДОБАВЬТЕ ЭТОТ ПРИНТ ДЛЯ ОТЛАДКИ:
-    logger.debug("=== RAW LLM RESPONSE ===")
-    logger.debug(repr(content)) # repr покажет все скрытые символы и пустые строки
-    logger.debug("========================")
-
-    # Ищем объект в фигурных скобках
-    match = re.search(r'\{.*?\}', content, re.DOTALL)
-    if match:
-        json_str = match.group(0)
-        result = json.loads(json_str)
-    else:
-        raise ValueError("Could not find JSON object in LLM response")
-    
-    return result
+    try:
+        # 4. Вызываем и сразу получаем валидный словарь
+        result = chain.invoke({
+            "tree_text": tree_text,
+            "readme": readme if readme else "No README found.",
+            "files_text": files_text
+        })
+        
+        logger.debug("=== PARSED LLM RESPONSE (SUMMARY) ===")
+        logger.debug(result)
+        logger.debug("=====================================")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to parse summary JSON: {e}")
+        raise ValueError("Could not extract valid JSON object from LLM response")
 
 
 @app.route('/summarize', methods=['POST'])
