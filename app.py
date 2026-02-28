@@ -1,9 +1,25 @@
+from flask import Flask, request, jsonify
 import os
 import requests
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import json
 import re
+import base64
+
+import logging
+
+# Настраиваем логирование: пишем в файл app.log и в консоль
+logging.basicConfig(
+    level=logging.DEBUG, # Уровень отлова сообщений
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("app.log", encoding="utf-8"),
+        logging.StreamHandler() # Вывод в консоль
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -15,9 +31,12 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 llm = ChatOpenAI(
     base_url="https://api.tokenfactory.nebius.com/v1/",
     api_key=NEBIUS_API_KEY,
-    model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    #model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    model="meta-llama/Meta-Llama-3.1-8B-Instruct",
     temperature=0
 )
+
+app = Flask(__name__)
 
 
 def parse_github_url(url):
@@ -35,14 +54,13 @@ def get_repo_tree(owner, repo, max_depth=2):
     """Получает дерево файлов репозитория с ограничением глубины"""
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     
-    # Получаем полное дерево
     url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
     response = requests.get(url, headers=headers)
     response.raise_for_status()
     
     tree = response.json().get("tree", [])
     
-    # Фильтруем по глубине (считаем количество слешей)
+    # Фильтруем по глубине
     filtered_tree = []
     for item in tree:
         depth = item["path"].count("/")
@@ -62,8 +80,6 @@ def get_readme(owner, repo):
         
         if response.status_code == 200:
             content = response.json().get("content", "")
-            # Декодируем из base64
-            import base64
             return base64.b64decode(content).decode("utf-8")
     
     return None
@@ -78,31 +94,13 @@ def get_file_content(owner, repo, file_path):
     response.raise_for_status()
     
     content = response.json().get("content", "")
-    import base64
     return base64.b64decode(content).decode("utf-8")
 
 
-def analyze_repo_structure(github_url):
-    """
-    Функция 1: Анализирует структуру репозитория и выбирает важные файлы
-    
-    Args:
-        github_url: URL GitHub репозитория
-        
-    Returns:
-        list: Список путей до 6 самых важных файлов
-    """
-    # Парсим URL
-    owner, repo = parse_github_url(github_url)
-    
-    # Получаем дерево и README
-    tree = get_repo_tree(owner, repo, max_depth=2)
-    readme = get_readme(owner, repo)
-    
-    # Формируем текстовое представление дерева
+def analyze_repo_structure(owner, repo, tree, readme):
+    """Анализирует структуру и выбирает важные файлы"""
     tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in tree])
     
-    # Формируем промпт
     prompt = f"""You are analyzing a GitHub repository structure.
 
 Repository tree (depth up to 2):
@@ -122,33 +120,27 @@ Return ONLY a JSON array of file paths, for example:
 Important: Select only files (not directories), prioritize configuration files, entry points, and core source files.
 """
     
-    # Отправляем в LLM
     response = llm.invoke(prompt)
-    
-    # Парсим ответ
     content = response.content.strip()
-    # Убираем markdown форматирование если есть
-    content = content.replace("```json", "").replace("```", "").strip()
+
+    # ДОБАВЬТЕ ЭТОТ ПРИНТ ДЛЯ ОТЛАДКИ:
+    logger.debug("=== RAW LLM RESPONSE ===")
+    logger.debug(repr(content)) # repr покажет все скрытые символы и пустые строки
+    logger.debug("========================")
     
-    files = json.loads(content)
+    # Ищем массив в квадратных скобках
+    match = re.search(r'\[.*?\]', content, re.DOTALL)
+    if match:
+        json_str = match.group(0)
+        files = json.loads(json_str)
+    else:
+        raise ValueError("Could not find JSON array in LLM response")
     
-    return files, owner, repo, tree, readme
+    return files
 
 
 def generate_repo_summary(owner, repo, tree, readme, important_files):
-    """
-    Функция 2: Генерирует summary репозитория
-    
-    Args:
-        owner: Владелец репозитория
-        repo: Название репозитория
-        tree: Дерево файлов
-        readme: Содержимое README
-        important_files: Список важных файлов
-        
-    Returns:
-        dict: JSON с полями summary, technologies, structure
-    """
+    """Генерирует summary репозитория"""
     # Получаем содержимое важных файлов
     files_content = {}
     for file_path in important_files:
@@ -158,15 +150,12 @@ def generate_repo_summary(owner, repo, tree, readme, important_files):
         except Exception as e:
             print(f"Warning: Could not fetch {file_path}: {e}")
     
-    # Формируем дерево как текст
     tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in tree])
     
-    # Формируем содержимое файлов как текст
     files_text = ""
     for path, content in files_content.items():
         files_text += f"\n\n=== FILE: {path} ===\n{content}\n"
     
-    # Промпт
     prompt = f"""Analyze this GitHub repository and provide a structured summary.
 
 Repository tree:
@@ -188,35 +177,83 @@ Return a valid JSON object with exactly these fields:
 Return ONLY the JSON object, no additional text.
 """
     
-    # Отправляем в LLM
     response = llm.invoke(prompt)
-    
-    # Парсим JSON
     content = response.content.strip()
-    content = content.replace("```json", "").replace("```", "").strip()
     
-    result = json.loads(content)
+    # ДОБАВЬТЕ ЭТОТ ПРИНТ ДЛЯ ОТЛАДКИ:
+    logger.debug("=== RAW LLM RESPONSE ===")
+    logger.debug(repr(content)) # repr покажет все скрытые символы и пустые строки
+    logger.debug("========================")
+
+    # Ищем объект в фигурных скобках
+    match = re.search(r'\{.*?\}', content, re.DOTALL)
+    if match:
+        json_str = match.group(0)
+        result = json.loads(json_str)
+    else:
+        raise ValueError("Could not find JSON object in LLM response")
     
     return result
 
 
-# Пример использования
-if __name__ == "__main__":
-    # Пример URL
-    github_url = "https://github.com/Comfy-Org/ComfyUI"
-    
-    print("Step 1: Analyzing repository structure...")
-    important_files, owner, repo, tree, readme = analyze_repo_structure(github_url)
-    print(f"Selected files: {important_files}")
-    
-    print("\nStep 2: Generating summary...")
-    summary = generate_repo_summary(owner, repo, tree, readme, important_files)
-    
-    # Выводим в консоль для наглядности
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
-
-    # Сохраняем в файл
-    with open("repo_summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
+@app.route('/summarize', methods=['POST'])
+def summarize():
+    """
+    POST /summarize
+    Принимает GitHub URL и возвращает summary репозитория
+    """
+    try:
+        # Получаем данные из запроса
+        data = request.get_json()
         
-    print("\n✅ Результат сохранен в файл repo_summary.json")
+        if not data or 'github_url' not in data:
+            return jsonify({
+                "error": "Missing required field: github_url"
+            }), 400
+        
+        github_url = data['github_url']
+        
+        # Парсим URL
+        try:
+            owner, repo = parse_github_url(github_url)
+        except ValueError as e:
+            return jsonify({
+                "error": str(e)
+            }), 400
+        
+        # Получаем дерево и README
+        tree = get_repo_tree(owner, repo, max_depth=2)
+        readme = get_readme(owner, repo)
+        
+        # Анализируем структуру
+        important_files = analyze_repo_structure(owner, repo, tree, readme)
+        
+        # Генерируем summary
+        summary_data = generate_repo_summary(owner, repo, tree, readme, important_files)
+        
+        return jsonify(summary_data), 200
+        
+    except requests.exceptions.HTTPError as e:
+        return jsonify({
+            "error": f"GitHub API error: {str(e)}"
+        }), 502
+        
+    except json.JSONDecodeError as e:
+        return jsonify({
+            "error": f"Failed to parse LLM response: {str(e)}"
+        }), 500
+        
+    except Exception as e:
+        return jsonify({
+            "error": f"Internal server error: {str(e)}"
+        }), 500
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "ok"}), 200
+
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
