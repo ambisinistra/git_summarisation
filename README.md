@@ -47,14 +47,14 @@ The application scans the project structure, reads the `README.md`, uses AI to s
 
 5. **Start the server with Gunicorn:**
 ```bash
-   gunicorn app_fixed:app -w 4 -b 0.0.0.0:8000
+   gunicorn app:app -w 4 -b 0.0.0.0:8000
 ```
    The server will start at `http://0.0.0.0:8000`.
    
    **Gunicorn parameters:**
    - `-w 4` — number of worker processes (adjust based on CPU cores)
    - `-b 0.0.0.0:8000` — bind to all interfaces on port 8000
-   - `app_fixed:app` — module name and Flask app object
+   - `app:app` — module name and Flask app object
 
 ---
 
