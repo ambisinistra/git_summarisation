@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 # Настраиваем логирование: пишем в файл app.log и в консоль
 logging.basicConfig(
-    level=logging.DEBUG, # Уровень отлова сообщений
+    level=logging.INFO, # Уровень отлова сообщений
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         #logging.FileHandler("app.log", encoding="utf-8"),

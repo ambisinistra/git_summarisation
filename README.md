@@ -22,34 +22,39 @@ The application scans the project structure, reads the `README.md`, uses AI to s
 ## Installation and Setup
 
 1. **Clone the repository (or create a project folder):**
-   ```bash
-   git clone <your_repository>
-   cd <project_folder>
-   ```
+```bash
+   git clone 
+   cd 
+```
 
 2. **Create and activate a virtual environment:**
-   ```bash
+```bash
    python -m venv venv
    source venv/bin/activate  # On Windows use: venv\Scripts\activate
-   ```
+```
 
 3. **Install dependencies:**
-   ```bash
-   pip install flask requests python-dotenv langchain-openai pydantic langchain-core
-   ```
+```bash
+   pip install flask requests python-dotenv langchain-openai pydantic langchain-core gunicorn
+```
 
 4. **Configure environment variables:**
    Create a `.env` file in the root of the project and add your keys:
-   ```env
+```env
    NEBIUS_API_KEY=your_nebius_api_key
    GITHUB_TOKEN=your_github_token
-   ```
+```
 
-5. **Start the server:**
-   ```bash
-   python app.py
-   ```
-   The server will start at `http://0.0.0.0:5000`.
+5. **Start the server with Gunicorn:**
+```bash
+   gunicorn app_fixed:app -w 4 -b 0.0.0.0:8000
+```
+   The server will start at `http://0.0.0.0:8000`.
+   
+   **Gunicorn parameters:**
+   - `-w 4` — number of worker processes (adjust based on CPU cores)
+   - `-b 0.0.0.0:8000` — bind to all interfaces on port 8000
+   - `app_fixed:app` — module name and Flask app object
 
 ---
 
@@ -63,7 +68,7 @@ Accepts a GitHub repository URL, fetches the repository contents, and returns a 
 **Request body:**
 ```json
 {
-  "github_url": "[https://github.com/psf/requests](https://github.com/psf/requests)"
+  "github_url": "https://github.com/psf/requests"
 }
 ```
 
@@ -85,6 +90,14 @@ Accepts a GitHub repository URL, fetches the repository contents, and returns a 
 | `summary` | `string` | A human-readable description of what the project does |
 | `technologies` | `string[]` | List of main technologies, languages, and frameworks used |
 | `structure` | `string` | Brief description of the project structure and organization |
+
+**Error Response:**
+```json
+{
+  "status": "error",
+  "message": "Description of what went wrong"
+}
+```
 
 **Possible Errors:**
 * `400 Bad Request`: Missing URL or invalid URL format.
