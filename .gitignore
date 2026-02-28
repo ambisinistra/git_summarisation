@@ -1,0 +1,69 @@
+# ============================================================
+# GitHub Repository Summarizer — .gitignore
+# ============================================================
+
+archive/
+jsons/
+
+# --- Environment & Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python Virtual Environment ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Python Cache & Bytecode ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# --- Distribution / Packaging ---
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Testing & Coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.coveragerc
+
+# --- Type Checking ---
+.mypy_cache/
+.dmypy.json
+.pytype/
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+logs/
+
+# --- LangGraph / LangChain Local State ---
+# LangGraph can persist checkpoints locally if a checkpointer is used
+langgraph.db
+*.sqlite
+*.sqlite3
+
+# --- Jupyter Notebooks (if used for experimentation) ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- Docker ---
+*.env.docker
