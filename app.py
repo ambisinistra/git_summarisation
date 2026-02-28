@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import json
 import re
+from urllib.parse import urlparse
 import base64
 import logging
 
@@ -53,15 +54,27 @@ class RepoSummarySchema(BaseModel):
 app = Flask(__name__)
 
 
-def parse_github_url(url):
-    """Парсит GitHub URL и возвращает owner и repo"""
-    pattern = r"github\.com/([^/]+)/([^/]+)"
-    match = re.search(pattern, url)
-    if match:
-        owner = match.group(1)
-        repo = match.group(2).replace(".git", "")
-        return owner, repo
-    raise ValueError("Invalid GitHub URL")
+def parse_github_url(url: str):
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("URL must be a non-empty string")
+
+    # Нормализация SSH-формата: git@github.com:owner/repo -> https://github.com/owner/repo
+    if re.match(r"^git@", url):
+        url = re.sub(r"^git@([^:]+):", r"https://\1/", url)
+
+    parsed = urlparse(url)
+    
+    # Разбиваем путь на сегменты, убирая пустые строки (от слешей)
+    segments = [s for s in parsed.path.split("/") if s]
+
+    if len(segments) < 2:
+        raise ValueError(f"Cannot extract owner/repo from URL: {url}")
+
+    owner = segments[0]
+    # Убираем .git только в конце строки
+    repo = re.sub(r"\.git$", "", segments[1])
+
+    return owner, repo
 
 
 def get_repo_tree(owner, repo, max_depth=2):
