@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify
 import os
 import requests
+from requests.exceptions import HTTPError
+import warnings
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import json
@@ -77,59 +79,82 @@ def parse_github_url(url: str):
     return owner, repo
 
 
-def get_repo_tree(owner, repo, max_depth=2):
-    """Получает дерево файлов репозитория с ограничением глубины и логированием исключенных файлов"""
+def get_repo_tree(owner: str, repo: str, max_depth: int = 2) -> list[dict]:
+    """
+    Получает дерево файлов репозитория.
+    Возвращает только blob-файлы (без директорий), прошедшие все фильтры.
+    """
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    
-    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    
-    tree = response.json().get("tree", [])
-    
-    # Расширения, которые мы хотим исключить
     binary_extensions = (
         '.exe', '.dll', '.so', '.a', '.lib', '.dylib', '.o', '.obj',
         '.zip', '.tar', '.gz', '.rar', '.7z', '.pdf', '.doc', '.docx',
-        '.png', '.jpg', '.jpeg', '.gif', '.mp3', '.mp4', '.iso', '.db', 
+        '.png', '.jpg', '.jpeg', '.gif', '.mp3', '.mp4', '.iso', '.db',
         '.sqlite', '.jar', '.class', '.pyc', '.whl', '.ds_store', '.svg',
-        '.woff', '.woff2', '.ttf', '.eot', '.ico', '.lockb', 'package-lock.json'
+        '.woff', '.woff2', '.ttf', '.eot', '.ico', '.lockb',
     )
-    
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+    except HTTPError as e:
+        if e.response.status_code == 409:
+            logger.debug("[%s/%s] Репозиторий пустой (409 Conflict), возвращаем []", owner, repo)
+            return []
+        raise
+
+    data = response.json()
+    tree = data.get("tree", [])
+
+    logger.debug(
+        "[%s/%s] Получено записей от API: %d (truncated=%s)",
+        owner, repo, len(tree), data.get("truncated", False)
+    )
+
+    if data.get("truncated"):
+        warnings.warn(
+            f"GitHub API вернул неполное дерево для {owner}/{repo} "
+            f"(более 100 000 файлов или >7 MB). "
+            f"Используйте нерекурсивный обход поддеревьев для полного результата.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     filtered_tree = []
-    excluded_tree = []
-    
+    excluded_tree = []  # (путь, причина)
+
     for item in tree:
-        # 1. Проверяем глубину
         depth = item["path"].count("/")
+
         if depth >= max_depth:
+            excluded_tree.append((item["path"], f"depth={depth} >= max_depth={max_depth}"))
             continue
-            
-        # 2. Проверяем расширения (бинарники и ненужные файлы)
-        if item["type"] == "blob" and item["path"].lower().endswith(binary_extensions):
-            # Файл попал под фильтр — добавляем в список исключенных
-            excluded_tree.append(item)
+
+        if item["type"] != "blob":
+            excluded_tree.append((item["path"], f"type={item['type']}"))
             continue
-            
-        # 3. Файл прошел все фильтры — добавляем в итоговое дерево
+
+        path_lower = item["path"].lower()
+        if path_lower.endswith(binary_extensions) or path_lower.endswith("package-lock.json"):
+            excluded_tree.append((item["path"], "binary/irrelevant extension"))
+            continue
+
         filtered_tree.append(item)
-        
-    # --- ЛОГИРОВАНИЕ ---
-    
-    # Форматируем списки в читаемый текст
-    filtered_tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in filtered_tree])
-    excluded_tree_text = "\n".join([f"{item['type']}: {item['path']}" for item in excluded_tree])
-    
-    logger.debug("=== ИТОГОВОЕ ДЕРЕВО (отправляется в LLM) ===")
-    logger.debug(f"\n{filtered_tree_text}")
-    logger.debug(f"Всего элементов: {len(filtered_tree)}\n")
-    
-    logger.debug("=== ИСКЛЮЧЕННЫЕ ФАЙЛЫ (отфильтрованы по расширению) ===")
-    logger.debug(f"\n{excluded_tree_text if excluded_tree else 'Нет исключенных файлов'}")
-    logger.debug(f"Всего отсеяно: {len(excluded_tree)}\n")
-    logger.debug("======================================================")
-    
-    # Возвращаем очищенное дерево
+
+    # --- Итоговый дамп ---
+    logger.debug(
+        "[%s/%s] Итого после фильтрации: %d файлов (исключено: %d)",
+        owner, repo, len(filtered_tree), len(excluded_tree)
+    )
+
+    if excluded_tree:
+        excluded_lines = "\n".join(f"  - {path}  [{reason}]" for path, reason in excluded_tree)
+        logger.debug("[%s/%s] Исключённые записи:\n%s", owner, repo, excluded_lines)
+
+    if filtered_tree:
+        included_lines = "\n".join(f"  + {item['path']}" for item in filtered_tree)
+        logger.debug("[%s/%s] Включённые файлы:\n%s", owner, repo, included_lines)
+
     return filtered_tree
 
 
