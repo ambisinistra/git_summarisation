@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.DEBUG, # Уровень отлова сообщений
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("app.log", encoding="utf-8"),
+        #logging.FileHandler("app.log", encoding="utf-8"),
         logging.StreamHandler() # Вывод в консоль
     ]
 )
@@ -37,8 +37,8 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 llm = ChatOpenAI(
     base_url="https://api.tokenfactory.nebius.com/v1/",
     api_key=NEBIUS_API_KEY,
-    #model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
-    model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    #model="meta-llama/Meta-Llama-3.1-8B-Instruct",
     request_timeout=120.0, # Ждать максимум 120 секунд!
     temperature=0,
     model_kwargs={"response_format": {"type": "json_object"}},
@@ -207,7 +207,12 @@ Based on this structure and README, select up to 6 most valuable files that woul
 2. How it works
 3. Its architecture and main components
 
-Important: Select only files (not directories), prioritize configuration files, entry points, and core source files.
+CRITICAL INSTRUCTIONS FOR FILE PATHS:
+- You MUST copy the file paths EXACTLY as they appear in the "Repository tree" list above.
+- DO NOT modify, shorten, or guess file paths. 
+- DO NOT remove prefixes like 'src/', 'lib/', or 'app/'. 
+- If the tree shows "src/requests/api.py", you must return exactly "src/requests/api.py".
+- Select only files (not directories). Prioritize configuration files, entry points, and core source files.
 
 {format_instructions}""",
         input_variables=["tree_text", "readme"],
@@ -314,8 +319,10 @@ def summarize():
         data = request.get_json()
         
         if not data or 'github_url' not in data:
+            # ИСПРАВЛЕНО: строка 327 - изменён формат ошибки с {"error": ...} на {"status": "error", "message": ...}
             return jsonify({
-                "error": "Missing required field: github_url"
+                "status": "error",
+                "message": "Missing required field: github_url"
             }), 400
         
         github_url = data['github_url']
@@ -324,8 +331,10 @@ def summarize():
         try:
             owner, repo = parse_github_url(github_url)
         except ValueError as e:
+            # ИСПРАВЛЕНО: строка 338 - изменён формат ошибки с {"error": ...} на {"status": "error", "message": ...}
             return jsonify({
-                "error": str(e)
+                "status": "error",
+                "message": str(e)
             }), 400
         
         # Получаем дерево и README
@@ -341,18 +350,24 @@ def summarize():
         return jsonify(summary_data), 200
         
     except requests.exceptions.HTTPError as e:
+        # ИСПРАВЛЕНО: строка 359 - изменён формат ошибки с {"error": ...} на {"status": "error", "message": ...}
         return jsonify({
-            "error": f"GitHub API error: {str(e)}"
+            "status": "error",
+            "message": f"GitHub API error: {str(e)}"
         }), 502
         
     except json.JSONDecodeError as e:
+        # ИСПРАВЛЕНО: строка 366 - изменён формат ошибки с {"error": ...} на {"status": "error", "message": ...}
         return jsonify({
-            "error": f"Failed to parse LLM response: {str(e)}"
+            "status": "error",
+            "message": f"Failed to parse LLM response: {str(e)}"
         }), 500
         
     except Exception as e:
+        # ИСПРАВЛЕНО: строка 373 - изменён формат ошибки с {"error": ...} на {"status": "error", "message": ...}
         return jsonify({
-            "error": f"Internal server error: {str(e)}"
+            "status": "error",
+            "message": f"Internal server error: {str(e)}"
         }), 500
 
 
@@ -363,4 +378,4 @@ def health():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=8000)
