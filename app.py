@@ -55,6 +55,12 @@ class RepoSummarySchema(BaseModel):
 
 app = Flask(__name__)
 
+def get_github_headers():
+    """Возвращает headers для GitHub API с токеном если есть"""
+    headers = {}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
 
 def parse_github_url(url: str):
     if not isinstance(url, str) or not url.strip():
@@ -84,7 +90,7 @@ def get_repo_tree(owner: str, repo: str, max_depth: int = 2) -> list[dict]:
     Получает дерево файлов репозитория.
     Возвращает только blob-файлы (без директорий), прошедшие все фильтры.
     """
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    headers = get_github_headers()
     binary_extensions = (
         '.exe', '.dll', '.so', '.a', '.lib', '.dylib', '.o', '.obj',
         '.zip', '.tar', '.gz', '.rar', '.7z', '.pdf', '.doc', '.docx',
@@ -160,7 +166,7 @@ def get_repo_tree(owner: str, repo: str, max_depth: int = 2) -> list[dict]:
 
 def get_readme(owner, repo):
     """Получает содержимое README.md если есть"""
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    headers = get_github_headers()
     
     for readme_name in ["README.md", "readme.md", "Readme.md", "README"]:
         url = f"https://api.github.com/repos/{owner}/{repo}/contents/{readme_name}"
@@ -175,7 +181,7 @@ def get_readme(owner, repo):
 
 def get_file_content(owner, repo, file_path):
     """Получает содержимое конкретного файла"""
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    headers = get_github_headers()
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}"
     
     response = requests.get(url, headers=headers)
@@ -378,4 +384,8 @@ def health():
 
 
 if __name__ == '__main__':
+    if not GITHUB_TOKEN:
+        logging.warning("⚠️  Warning: GITHUB_TOKEN not set. API rate limit: 60 requests/hour")
+    else:
+        logging.info("✓ GitHub token loaded. API rate limit: 5000 requests/hour")
     app.run(debug=False, host='0.0.0.0', port=8000)
